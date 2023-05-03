@@ -15,6 +15,7 @@ logging.getLogger().setLevel(logging.DEBUG)
 node_id = None
 node_ids = None
 state = 'Follower' # can be one of the following: 'Follower', 'Candidate', 'Leader'
+leader_id = None
 majority = None # quantity of nodes necessary to represent the majority
 stateMachine = dict()
 lock = Lock() # lock of all variables
@@ -31,6 +32,8 @@ receivedVotes = set() #data structure to keep the ids of the nodes that granted 
 # and term when entry was received by leader;
 #First index is 1
 log = []
+
+requestsBuffer = [] # when on 'Follower' state, buffer received requests until next contact with a leader
 
 ### Volatile state on all servers ###
 
@@ -161,27 +164,31 @@ def handleInit(msg):
 ########### Handle Read Request ###########
 
 def handleRead(msg):
+    global requestsBuffer
     if state == 'Leader':
         logging.info('read %s', msg.body.key)
         lock.acquire()
-        addEntryToLog(msg)
-        sendAppendEntriesRPCToAll()
+        value = stateMachine.get(msg.body.key)
         lock.release()
-    else: #Only Leader can answer requests from clients
-        reply(msg, type='error', code=11)
+        reply(msg, type='read_ok', value=value)
+    else: 
+        #TODO - quorum read
+        broadcast(type="read_quorom", key=msg.body.key)
 
 
 ########### Handle Write Request ###########
 
 def handleWrite(msg):
+    global requestsBuffer
     if state == 'Leader':
         logging.info('write %s:%s', msg.body.key, msg.body.value)
         lock.acquire()
         addEntryToLog(msg)
         sendAppendEntriesRPCToAll()
         lock.release()
-    else: #Only Leader can answer requests from clients
-        reply(msg, type='error', code=11)
+    else: 
+        #Only Leader can answer this type of requests from clients
+        requestsBuffer.append(msg)  # save request while election is still happening
 
 
 ########### Handle CAS Request ###########
@@ -194,7 +201,8 @@ def handleCAS(msg):
         sendAppendEntriesRPCToAll()
         lock.release()
     else: #Only Leader can answer requests from clients
-        reply(msg, type='error', code=11)
+        #Only Leader can answer this type of requests from clients
+        requestsBuffer.append(msg)  # save request while election is still happening
 
 ########### Auxiliar Functions ###########
 
@@ -218,8 +226,9 @@ def initializeLeaderVolatileState():
 
 
 def changeStateTo(newState):
-    global state, tout, receivedVotes
+    global state, tout, receivedVotes, leader_id
 
+    leader_id = None
     state = newState
     tout = getTimeout() #refresh timeout
 
@@ -227,6 +236,7 @@ def changeStateTo(newState):
         initializeLeaderVolatileState()
     elif newState == 'Candidate':
         receivedVotes.clear()
+        
 
     
 
@@ -360,8 +370,9 @@ def sendHeartBeatsToAll():
         if n != node_id:
             sendAppendEntriesRPC(n, True)
 
+#TODO - ver se devemos manter o buffer até receber confirmação que o leader recebeu os pedidos, dos clientes, encaminhados
 def handleAppendEntriesRPC(rpc):
-    global currentTerm, log, commitIndex, votedFor, state, tout
+    global currentTerm, log, commitIndex, votedFor, state, tout, requestsBuffer
 
     try: 
 
@@ -375,6 +386,7 @@ def handleAppendEntriesRPC(rpc):
         
         #ensures that the state is of follower and resets election timeout
         changeStateTo('Follower')
+        leader_id = rpc.src
 
         if rpc.body.prevLogIndex != 0:
             #check existence of the entry with prevLogIndex sent by the leader
@@ -382,7 +394,8 @@ def handleAppendEntriesRPC(rpc):
             # present in the leader's log, then a false response must be sent
             prevEntry = getLogEntry(rpc.body.prevLogIndex)
             if prevEntry == None or prevEntry[1] != rpc.body.prevLogTerm: 
-                reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=False)
+                reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=False, buffered_messages=requestsBuffer)
+                requestsBuffer.clear()
                 return;
             
         #used to keep track of the index that the entries have
@@ -413,7 +426,8 @@ def handleAppendEntriesRPC(rpc):
         #sends positive reply
         #also informs the nextIndex to the leader to allow
         # the optimization of sending less times the same entry
-        reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=True, nextIndex=log_i)
+        reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=True, nextIndex=log_i, buffered_messages=requestsBuffer)
+        requestsBuffer.clear()
 
         #tries to apply some commands
         #only happens if there are commands 
@@ -423,11 +437,16 @@ def handleAppendEntriesRPC(rpc):
     finally: lock.release()
 
 def handleAppendEntriesRPCResponse(response):
-    global currentTerm, nextIndex, matchIndex, state, votedFor, tout
+    global currentTerm, nextIndex, matchIndex, state, votedFor, tout, log
 
     try:
 
         lock.acquire()
+
+        # add forward messages from followers to log 
+        bufferedMessages = response.body.buffered_messages
+        for m in bufferedMessages:
+            log.append(m)    
 
         #ignores in case it is no longer a leader
         if state != 'Leader': return
@@ -591,6 +610,14 @@ def handleRequestVoteRPCResponse(response):
 
 
 
+def handleQuoromRead(msg):
+    if msg.body.key in stateMachine:
+        value = stateMachine.get(msg.body.key)
+        reply(msg, type='read_quorom_ok', value=value)
+    else:
+        reply(msg, type='read_quorom_ok', value=None)
+
+
 ########### Main Loop ###########
 
 for msg in receiveAll():
@@ -617,6 +644,9 @@ for msg in receiveAll():
 
     elif msg.body.type == 'RequestVoteRPCResponse':
         handleRequestVoteRPCResponse(msg)
+
+    elif msg.body.type == 'read_quorom':
+        handleQuoromRead(msg)
 
     else:
         logging.warning('unknown message type %s', msg.body.type)
