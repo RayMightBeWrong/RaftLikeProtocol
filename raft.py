@@ -17,7 +17,7 @@ node_ids = None
 state = 'Follower' # can be one of the following: 'Follower', 'Candidate', 'Leader'
 leader_id = None
 majority = None # quantity of nodes necessary to represent the majority
-stateMachine = dict()
+stateMachine = dict() # state machine k -> ( value, term, index )
 lock = Lock() # lock of all variables
 
 ### Persistent state on all servers ###
@@ -57,6 +57,11 @@ nextIndex = dict()
 # (initialized to 0, increases monotonically)
 matchIndex = dict()
  
+###### QUORUM READ STATE ######
+quorumReadCounter = 0 # request id, usefull to keep track of responses 
+quorumReadRequests = {} # dictionary to collect responses ( id ) -> ( msg, value, index, term, numberOfAcks )
+
+
 
 ########### Timeouts ###########
 
@@ -164,16 +169,25 @@ def handleInit(msg):
 ########### Handle Read Request ###########
 
 def handleRead(msg):
-    global requestsBuffer
+    global requestsBuffer, quorumReadCounter, quorumReadRequests
     if state == 'Leader':
         logging.info('read %s', msg.body.key)
         lock.acquire()
-        value = stateMachine.get(msg.body.key)
+        
+         
+        value = None
+        valueToUnpack = stateMachine.get(msg.body.key)  
+        if valueToUnpack != None:
+            value, _, _ = valueToUnpack
+
         lock.release()
         reply(msg, type='read_ok', value=value)
     else: 
         #TODO - quorum read
-        broadcast(type="read_quorom", key=msg.body.key)
+        logging.debug("READ QUORUM ***")
+        broadcast(type="read_quorum", key=msg.body.key, quorumReadId=quorumReadCounter ) # send reade quotum message to all nodes 
+        quorumReadRequests[quorumReadCounter] = (msg, None, None, None, 0)
+        quorumReadCounter += 1 # increment quorumReadCounter
 
 
 ########### Handle Write Request ###########
@@ -298,25 +312,37 @@ def tryUpdateLastApplied():
 
 # Apply command to state machine
 def applyToStateMachine(msg):
+    global stateMachine
+
     if msg.body.type == 'read':
-        value = stateMachine.get(msg.body.key)
+        
+        value = None
+        valueToUnpack = stateMachine.get(msg.body.key)  
+        
+        if valueToUnpack != None:
+            value , _ , _ = valueToUnpack
 
         if state == 'Leader':
             reply(msg, type='read_ok', value=value)
     
     elif msg.body.type == 'write':
-        stateMachine[msg.body.key] = msg.body.value
+        stateMachine[msg.body.key] = (msg.body.value, currentTerm, lastApplied) 
         if state == 'Leader':
             reply(msg, type='write_ok')
 
     elif msg.body.type == 'cas':
-        value = stateMachine.get(msg.body.key)
+       
+        value = None
+        valueToUnpack = stateMachine.get(msg.body.key)   
+        if valueToUnpack != None:
+            value, _, _ = valueToUnpack
+       
         if value == None:
             if state == 'Leader':
                 reply(msg, type='error', code=20)
         else:
             if value == getattr(msg.body,"from"):
-                stateMachine[msg.body.key] = msg.body.to
+                stateMachine[msg.body.key] = (msg.body.to, currentTerm, lastApplied) 
                 if state == 'Leader':
                     reply(msg, type="cas_ok")
             else:
@@ -446,7 +472,7 @@ def handleAppendEntriesRPCResponse(response):
         # add forward messages from followers to log 
         bufferedMessages = response.body.buffered_messages
         for m in bufferedMessages:
-            log.append(m)    
+            addEntryToLog(m)    
 
         #ignores in case it is no longer a leader
         if state != 'Leader': return
@@ -489,6 +515,46 @@ def handleAppendEntriesRPCResponse(response):
                 tryUpdateLastApplied()
 
     finally: lock.release()
+
+
+def handleQuorumRead(msg):
+    global stateMachine 
+    quorumReadId = msg.body.quorumReadId
+    
+    if msg.body.key in stateMachine:
+        value, term, index = stateMachine.get(msg.body.key) #TODO -> fix value unpack
+        reply(msg, type='read_quorum_ok', value=value, entryTerm=term, entryIndex=index, quorumReadId=quorumReadId )
+    
+    else:
+        reply(msg, type='read_quorum_ok', value=None, entryTerm=None, entryIndex=None, quorumReadId=quorumReadId)
+
+
+def handleQuorumReadResponse(msg):
+    global quorumReadCounter, stateMachine, quorumReadRequests
+    
+    quorumReadId = msg.body.quorumReadId # get the quorum_read_id to update the correct entry
+    
+    quorumValue = msg.body.value # value returned from read
+
+    entryTerm = msg.body.entryTerm # term at the time of applying entry
+    entryIndex=msg.body.entryIndex # index of the entry applied 
+
+    readMessage, value, term, index, counter = quorumReadRequests[quorumReadId]
+
+    if value == None and ( term == None or term <= entryTerm) and (index == None or index < entryIndex) and counter < majority: 
+        counter += 1 # every time value is updated increment ackcounter
+        quorumReadRequests[quorumReadId] = ( readMessage, quorumValue, entryTerm, entryIndex, counter ) 
+        logging.info("counter: " + str(counter))
+        logging.info("quorum read id : "+ str(quorumReadId))
+        if counter >= majority: # check if a majority has been received
+            reply(readMessage, type='read_ok', value=quorumValue)
+            logging.info("replied")
+    else:
+        counter += 1
+        quorumReadRequests[quorumReadId] = (readMessage, value, term, index, counter)
+        if counter >= majority: # check if a majority has been received
+            reply(readMessage, type='read_ok', value=value)
+            logging.info("replied")
 
 
 ########### RequestVote RPC ###########
@@ -609,15 +675,6 @@ def handleRequestVoteRPCResponse(response):
     finally: lock.release()
 
 
-
-def handleQuoromRead(msg):
-    if msg.body.key in stateMachine:
-        value = stateMachine.get(msg.body.key)
-        reply(msg, type='read_quorom_ok', value=value)
-    else:
-        reply(msg, type='read_quorom_ok', value=None)
-
-
 ########### Main Loop ###########
 
 for msg in receiveAll():
@@ -645,8 +702,11 @@ for msg in receiveAll():
     elif msg.body.type == 'RequestVoteRPCResponse':
         handleRequestVoteRPCResponse(msg)
 
-    elif msg.body.type == 'read_quorom':
-        handleQuoromRead(msg)
+    elif msg.body.type == 'read_quorum':
+        handleQuorumRead(msg)
+
+    elif msg.body.type == 'read_quorum_ok':
+        handleQuorumReadResponse(msg)
 
     else:
         logging.warning('unknown message type %s', msg.body.type)
