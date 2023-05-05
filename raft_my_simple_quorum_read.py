@@ -7,50 +7,18 @@ from ms import receiveAll, reply, send
 from random import Random
 from datetime import datetime
 from math import comb
+import state
+
 
 logging.getLogger().setLevel(logging.DEBUG)
 
+########### STATE CLASSES ###########
 
-########### global variables ###########
-
-node_id = None
-node_ids = None
-state = 'Follower' # can be one of the following: 'Follower', 'Candidate', 'Leader'
-leader_id = None
-majority = None # quantity of nodes necessary to represent the majority
-stateMachine = dict()
-lock = Lock() # lock of all variables
+stateClass = state.State()
 
 
-### Persistent state on all servers ###
-#(Updated on stable storage before responding to RPCs)
 
-currentTerm = 0 #latest term the server has seen
-votedFor = None #candidateId that received the vote in current term (or null if none)
-receivedVotes = set() #data structure to keep the ids of the nodes that granted the vote
-
-#log entries; 
-#Each entry contains the msg sent by the client (which contains the command for state machine), 
-# and term when entry was received by leader;
-#First index is 1
-log = []
-
-requestsBuffer = [] # when on 'Follower' state, buffer received Write/CAS requests until next contact with a leader
-
-
-### Volatile state on all servers ###
-
-#index of highest log entry known to be committed 
-# (initialized to 0, increases monotonically)
-commitIndex = 0 
-
-#index of highest log entry applied to state machine 
-# (initialized to 0, increases monotonically)
-lastApplied = 0
-
-probReadFromLeader = None # Probability(%) of querying the leader instead of performing a quorum read
-
-nextReadID = 0 # To associate an ID with the read requests from the clients
+########### Global Variables ###########
 
 #Dictionary to map an ID to a read request,
 # and in case of a quorum read, store the answers
@@ -63,43 +31,27 @@ activeReads = dict()
 
 readsLock = Lock() # exclusive lock for read operations
 
-
-### Volatile state on leaders ### 
-#(Reinitialized after election)
-
-#for each server, index of the next log entry to send to that server
-# (initialized to leader last log index + 1)
-nextIndex = dict() 
-
-#for each server, index of highest log entry known to be replicated on server
-# (initialized to 0, increases monotonically)
-matchIndex = dict()
- 
-randomizer = None
-
-
 ########### Raft Timeouts ###########
 
 raftTimeoutsThread = None
 runTimeoutThread = True # while true keep running the timeout thread 
-sendAppendEntriesRPCTout = 50 # timeout to send AppendEntries RPC to every server (in milliseconds)
-lowerLimElectionTout = 150 # lower limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
-upperLimElectionTout = 300 # upper limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
-raftTout = None #raft related timeout
+
+
 
 def getRandomElectionTimeout():
-    return randomizer.randint(lowerLimElectionTout, upperLimElectionTout)
+    randomizer = stateClass.getRandomizer()
+    return randomizer.randint(stateClass.getLowerLimitElectionTout(), stateClass.getUpperLimitElectionTout())
+
 
 #Depending on the state returns the raft related timeout
 def getRaftTimeout():
-    if state == 'Leader':
-        return sendAppendEntriesRPCTout
+    if stateClass.getState() == 'Leader':
+        return stateClass.getSendAppendEntriesRPCTout()
     else:
         return getRandomElectionTimeout()
 
 def resetRaftTimeout():
-    global raftTout
-    raftTout = getRaftTimeout()
+    stateClass.setRaftTout(getRaftTimeout())
 
 def initRaftTimeoutsThread():
     global raftTimeoutsThread
@@ -107,7 +59,7 @@ def initRaftTimeoutsThread():
     raftTimeoutsThread.start()
 
 def raftTimeoutsScheduler():
-    global state, raftTout
+    global stateClass, raftTout
 
     #This will be running in a secondary thread, and the timeouts are important, 
     # so if the node changes to another state it is important to catch that 
@@ -117,52 +69,62 @@ def raftTimeoutsScheduler():
     # a new batch of AppendEntries RPCs, the sleeps will be of a maximum of 50 ms
     
     # set the initial timeout
-    lock.acquire()
+    stateClass.lock.acquire()
     resetRaftTimeout()
-    lock.release()
+    stateClass.lock.release()
 
     while runTimeoutThread:
-        lock.acquire()
+        stateClass.lock.acquire()
 
-        if raftTout > sendAppendEntriesRPCTout:
+        if stateClass.getRaftout() > stateClass.getSendAppendEntriesRPCTout():
             #updates 'raftTout' variable, decreasing it by 'sendAppendEntriesRPCTout', 
             # but it can't go bellow 0, so we use the max function 
-            raftTout = max(0, raftTout - sendAppendEntriesRPCTout) 
+            #TODO -> update raft timout 
+            stateClass.updateRaftTout()
+            #raftTout = max(0, raftTout - sendAppendEntriesRPCTout) 
 
-            lock.release() # releases lock before going to sleep
+            stateClass.lock.release() # releases lock before going to sleep
 
             #dividing by thousand, since the argument is in seconds
-            time.sleep(sendAppendEntriesRPCTout / 1000) 
+            time.sleep(stateClass.getSendAppendEntriesRPCTout() / 1000) 
         else:
-            auxTout = raftTout
-            raftTout = 0
-            lock.release() # releases lock before going to sleep
+
+            auxTout = stateClass.getRaftout() #TODO -> get rafttout
+            stateClass.setRaftTout(0)
+            stateClass.lock.release() # releases lock before going to sleep
             time.sleep(auxTout / 1000)
 
-        lock.acquire()
+        stateClass.lock.acquire()
 
         #if the timeout reached 0, then its time to 
         # call the timeout handler and reset the timeout
-        if raftTout == 0:
-            if state == 'Leader':
-                handleSendAppendEntriesRPCTimeout()
+        if stateClass.getRaftout() == 0: #TODO -> get raftout 
+            if stateClass.getState() == 'Leader': #TODO -> get state 
+                handleSendAppendEntriesRPCTimeout() 
             else:
+                logging.warning("  ELECTION TIMEOUT")
                 handleElectionTimeout()
             resetRaftTimeout()
 
-        lock.release()
+        stateClass.lock.release()
 
 def handleSendAppendEntriesRPCTimeout():
     sendAppendEntriesRPCToAll()
 
 def handleElectionTimeout():
-    global state, currentTerm, votedFor
+    global currentTerm, votedFor
 
+    node_id = stateClass.getNodeId()
     # changes to Candidate state, increments term and votes for itself
-    changeStateTo('Candidate')
-    currentTerm += 1
-    votedFor = node_id
-    receivedVotes.add(node_id)
+    stateClass.changeStateTo('Candidate')
+    
+    #TODO -> use incrementTerm of state class function
+    stateClass.incrementTerm()
+
+    stateClass.setVotedFor(node_id)
+    
+    #TODO -> add to votes
+    stateClass.receiveVote(node_id)
 
     # broadcast RequestVote RPC
     broadcastRequestVoteRPC()
@@ -239,15 +201,19 @@ def readTimeoutsLoop():
 ########### Handle Init Msg ###########
 
 def handleInit(msg):
-    global node_id, node_ids, state, majority, probReadFromLeader, randomizer
+    global node_id, node_ids, majority, probReadFromLeader, randomizer
 
-    node_id = msg.body.node_id
-    node_ids = msg.body.node_ids
-    logging.info('node %s initialized', node_id)
+    stateClass.setNodeId(msg.body.node_id)
+    
+    stateClass.setNodeIds(msg.body.node_ids)
 
-    majority = len(node_ids) // 2 + 1
-    probReadFromLeader = calculateProbabilityOfQueryingLeader(len(node_ids))
-    randomizer = Random(node_id)
+    logging.info('node %s initialized', stateClass.getNodeId())
+    stateClass.initMajority()
+
+   
+    stateClass.initProbReadFromLeader()
+    
+    stateClass.initRandomizer()
 
     initRaftTimeoutsThread()
 
@@ -262,25 +228,26 @@ def handleInit(msg):
 def handleRead(msg):
     global requestsBuffer, nextReadID, activeReads
     try:
-        lock.acquire()
-        if state == 'Leader':
+        stateClass.lock.acquire()
+        if stateClass.getState() == 'Leader': 
             logging.info('read %s', msg.body.key)
-            if msg.body.key in stateMachine:
-                value,_ = stateMachine.get(msg.body.key)
-                reply(msg, type='read_ok', value=value)
+            if stateClass.keyInStateMachine(msg.body.key): 
+                value,_ = stateClass.getValueFromStateMachine(msg.body.key)
+                reply(msg, type='read_ok', value=value) 
             else:
                 reply(msg, type='read_ok', value=None)
             return -1
         else:
-            readsLock.acquire()
-            readID = nextReadID
-            nextReadID += 1
+            readsLock.acquire() 
+            readID = stateClass.getNextReadID() 
+            stateClass.incrementNextReadID()
 
             #Check if the read request should be answered by
             # querying the leader or by performing a quorum read
+            leader_id = stateClass.getLeaderId()
             if leader_id != None and maybeQueryLeader():
                 activeReads[readID] = (msg, "leader", leader_id)
-                send(node_id, leader_id, type="read_leader", read_id=readID, key=msg.body.key)
+                send(stateClass.getNodeId(), leader_id, type="read_leader", read_id=readID, key=msg.body.key)
                 logging.info("Trying leader read(ID=" + str(readID) + "): " + str(msg))
             else:
                 activeReads[readID] = (msg, "quorum", dict())           
@@ -294,7 +261,7 @@ def handleRead(msg):
             readsLock.release()    
             return readID
         
-    finally: lock.release()
+    finally: stateClass.lock.release()
 
 #Broadcast to random subset of nodes, 
 # excluding the leader and the node itself.
@@ -302,18 +269,22 @@ def broadcastToRandomSubset(**body):
     #Random selection of subset size. The value must be at least N // 2, 
     # so that a majority can be reached when counting the node itself.
     #The maximum value is number of nodes excluding the leader and the node itself (N - 2).
-    subsetSize = randomizer.randint(len(node_ids) // 2, len(node_ids) - 1)
-    nrRandRemoves = len(node_ids) - 2 - subsetSize
-    subset = node_ids.copy()
+    randomizer = stateClass.getRandomizer()
+    num_nodes = stateClass.getNumNodes()
+    subsetSize = randomizer.randint(num_nodes // 2, num_nodes - 1) 
+    nrRandRemoves = num_nodes - 2 - subsetSize 
+    subset = stateClass.getCopyNodes()
+    leader_id = stateClass.getLeaderId()
+    node_id = stateClass.getNodeId()
     if leader_id != None: 
-        subset.remove(leader_id)
+        subset.remove(leader_id) 
     else:
         nrRandRemoves += 1
     subset.remove(node_id)
 
     # Removes 'nrRandRemoves' nodes randomly
     for i in range(0, nrRandRemoves):
-        subset.pop(randomizer.randint(0,len(subset)))
+        subset.pop(randomizer.randint(0,len(subset)-1))
 
     # Broadcasts to the subset
     for n in subset:
@@ -325,162 +296,41 @@ def broadcastToRandomSubset(**body):
 
 def handleWrite(msg):
     global requestsBuffer
-    lock.acquire()
+    stateClass.lock.acquire()
 
-    if state == 'Leader':
+    if stateClass.getState() == 'Leader': 
         logging.info('write %s:%s', msg.body.key, msg.body.value)
-        addEntryToLog(msg)
+        stateClass.addEntryToLog(msg) 
         sendAppendEntriesRPCToAll()
     else: 
         #Only Leader can answer this type of requests from clients
-        requestsBuffer.append(msg)  # save request while election is still happening
+        stateClass.appendRequestEntry(msg)
     
-    lock.release()
+    stateClass.lock.release()
 
 ########### Handle CAS Request ###########
 
 def handleCAS(msg):
-    lock.acquire()
+    stateClass.lock.acquire()
 
-    if state == 'Leader':
+    #TODO -> get from state class function
+    if stateClass.getState() == 'Leader':  
         logging.info('cas %s:%s:%s', msg.body.key, getattr(msg.body,"from"), msg.body.to)
-        addEntryToLog(msg)
-        sendAppendEntriesRPCToAll()
+        stateClass.addEntryToLog(msg)
+        sendAppendEntriesRPCToAll() 
     else: #Only Leader can answer requests from clients
         #Only Leader can answer this type of requests from clients
-        requestsBuffer.append(msg)  # save request while election is still happening
+        stateClass.appendRequestEntry(msg)
     
-    lock.release()
+    stateClass.lock.release()
 
 ########### Auxiliar Functions ###########
 
-def initializeLeaderVolatileState():
-    global nextIndex, matchIndex
-    
-    #clear data structures
-    nextIndex.clear()
-    matchIndex.clear()
-
-    #since log entries index start at 1, the length of the log
-    # equals to the index of the last log entry.
-    # To obtain the index of the next entry, we only need to add 1 
-    # to the index of the last log entry
-    nextI = len(log) + 1 
-
-    for n in node_ids:
-        if n != node_id:
-            nextIndex[n] = nextI
-            matchIndex[n] = 0
-
-
-def changeStateTo(newState):
-    global state, receivedVotes, leader_id
-
-    leader_id = None
-    state = newState
-    resetRaftTimeout() #refresh timeout
-
-    if newState == 'Leader':
-        initializeLeaderVolatileState()
-        
-        #if there are messages buffered, add them to the log
-        for m in requestsBuffer:
-            addEntryToLog(m)
-        requestsBuffer.clear()
-
-    elif newState == 'Candidate':
-        receivedVotes.clear()
-        
-
-    
-
-def addEntryToLog(msg):
-    log.append((msg,currentTerm))
-
-#'index' starts at 1, therefore to get the entry we want, this 
-#  variable must be decremented by 1 unit
-def getLogEntry(index : int):
-    i = index - 1
-    if i < 0: return None
-    else: 
-        if i < len(log):
-            return log[i]
-        else:
-            return None
-
-#Returns list of entries that follow the one represented by the given index (including the one with the index)
-#'index' starts at 1, therefore to get the entry we want, this 
-#  variable must be decremented by 1 unit
-def getLogNextEntries(index : int):
-    i = index - 1
-    if i < 0: return []
-    else: return log[i:]
-
-#tries to update commit index if all the necessary conditions are met
-# returns true if the commitIndex was updated
-def leaderTryUpdateCommitIndex():
-    global commitIndex
-
-    #gets all match indexes and sorts them
-    matchIndexes = list(matchIndex.values())
-    matchIndexes.sort()
-
-    #starting from left we will find the biggest 
-    # index, that is higher then the commitIndex of the leader
-    # and that is replicated in the majority of nodes
-    N = matchIndexes[-(majority - 1)]
-
-    #If N is higher then the commitIndex, and if that entry's term 
-    # equals the current term, then update the commitIndex to N
-    if N > commitIndex and getLogEntry(N)[1] == currentTerm:
-        commitIndex = N
-        return True
-    
-    return False
-
-
-def tryUpdateLastApplied():
-    global lastApplied
-
-    if commitIndex > lastApplied:
-        #increment lastApplied in one unit and apply the command to the state machine
-        lastApplied+=1
-        applyToStateMachine(lastApplied)
-        
-        #try updating again
-        tryUpdateLastApplied()
-
-# Apply command to state machine
-def applyToStateMachine(logIndex):
-    if logIndex > len(log): return
-
-    msg, term = getLogEntry(logIndex)
-
-    if msg.body.type == 'write':
-        stateMachine[msg.body.key] = (msg.body.value,(logIndex, term))
-        if state == 'Leader':
-            reply(msg, type='write_ok')
-
-    elif msg.body.type == 'cas':
-        
-        if msg.body.key not in stateMachine:
-            if state == 'Leader':
-                reply(msg, type='error', code=20)
-        else:
-            value,_ = stateMachine.get(msg.body.key)
-
-            if value == getattr(msg.body,"from"):
-                stateMachine[msg.body.key] = (msg.body.to,(logIndex, term))
-                if state == 'Leader':
-                    reply(msg, type="cas_ok")
-            else:
-                if state == 'Leader':
-                    reply(msg, type="error", code=22)
-    
-
 # Sends msg with the given body to all the other nodes
 def broadcast(**body):
-    for n in node_ids:
+    logging.warning(body)
+    for n in stateClass.getNodes():
+        node_id = stateClass.getNodeId()
         if n != node_id:
             send(node_id, n, **body)
 
@@ -490,39 +340,40 @@ def broadcast(**body):
 # 'dest' - follower who is the target of this RPC
 def sendAppendEntriesRPC(dest, heartbeatOnly):
     #Get next entry to send to the follower
-    nextI = nextIndex[dest]
+    #nextI = nextIndex[dest]
+    nextI = stateClass.getNextIndex(dest)
 
     #Get the index and the term of the entry that 
     # precedes the next entry to send to that node
     prevLogIndex = nextI - 1
     prevLogTerm = 0
     if prevLogIndex > 0:
-        prevEntry = getLogEntry(prevLogIndex)
-        prevLogTerm = prevEntry[1]
+        prevEntry = stateClass.getLogEntry(prevLogIndex) #TODO -> use state class function 
+        prevLogTerm = prevEntry[1] 
 
     entries = []
     if not heartbeatOnly:
-        entries = getLogNextEntries(nextI)
+        entries = stateClass.getLogNextEntries(nextI) 
 
-    send(node_id, 
+    send(stateClass.getNodeId(), 
          dest, 
          type="AppendEntriesRPC", 
-         term=currentTerm,
-         leaderId=node_id,
-         leaderCommit=commitIndex,
+         term=stateClass.getCurrentTerm(),
+         leaderId=stateClass.getLeaderId(),
+         leaderCommit=stateClass.getCommitIndex(),
          prevLogIndex=prevLogIndex,
          prevLogTerm=prevLogTerm,
          entries=entries
          )
 
 def sendAppendEntriesRPCToAll():
-    for n in node_ids:
-        if n != node_id:
+    for n in stateClass.getNodes():
+        if n != stateClass.getNodeId():
             sendAppendEntriesRPC(n, False)
 
 def sendHeartBeatsToAll():
-    for n in node_ids:
-        if n != node_id:
+    for n in stateClass.getNodes():
+        if n != stateClass.getNodeId():
             sendAppendEntriesRPC(n, True)
 
 #TODO - ver se devemos manter o buffer até receber confirmação que o leader recebeu os pedidos, dos clientes, encaminhados
@@ -531,26 +382,29 @@ def handleAppendEntriesRPC(rpc):
 
     try: 
 
-        lock.acquire()
-        if currentTerm > rpc.body.term:
-            reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=False, buffered_messages=[])
+        stateClass.lock.acquire()
+        if stateClass.getCurrentTerm() > rpc.body.term:
+            reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=False, buffered_messages=[])
             return;
-        elif currentTerm < rpc.body.term:
-            currentTerm = rpc.body.term #update own term
-            votedFor = None
+        elif stateClass.getCurrentTerm() < rpc.body.term:
+            stateClass.setCurrentTerm(rpc.body.term)
+            #currentTerm = rpc.body.term #update own term
+            #votedFor = None
+            stateClass.setVotedFor(None)
         
         #ensures that the state is of follower and resets election timeout
-        changeStateTo('Follower')
-        leader_id = rpc.src
+        #changeStateTo('Follower')
+        stateClass.changeStateTo('Follower')
+        stateClass.setLeader(rpc.src)
+        #leader_id = rpc.src
 
         if rpc.body.prevLogIndex != 0:
             #check existence of the entry with prevLogIndex sent by the leader
             # if it doesnt exist, or if the entry does not match the entry 
             # present in the leader's log, then a false response must be sent
-            prevEntry = getLogEntry(rpc.body.prevLogIndex)
+            prevEntry = stateClass.getLogEntry(rpc.body.prevLogIndex)
             if prevEntry == None or prevEntry[1] != rpc.body.prevLogTerm: 
-                reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=False, buffered_messages=requestsBuffer)
-                requestsBuffer.clear()
+                reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=False, buffered_messages=stateClass.getRequestsBuffer())
                 return;
             
         #used to keep track of the index that the entries have
@@ -559,52 +413,55 @@ def handleAppendEntriesRPC(rpc):
         for i in range(0, len(rpc.body.entries)):
 
             leader_entry = rpc.body.entries[i]
-            node_entry = getLogEntry(log_i) 
+            node_entry = stateClass.getLogEntry(log_i) 
 
             #if the entry exists and it does not match the one sent by the leader,
             # then that entry and the ones that follow must be removed from the log
             if node_entry != None and node_entry[1] != leader_entry[1]:
-                for j in range(log_i - 1, len(log)):
-                    log.pop(log_i - 1)
+                for j in range(log_i - 1, stateClass.getLogSize()):
+                    stateClass.removeLogEntry(log_i - 1 )
 
             #appends the new entry to the log
-            log.append(leader_entry)
+            stateClass.logAppendEntry(leader_entry)
+            #log.append(leader_entry)
 
             log_i += 1
 
         #updates commitIndex to the minimum
         # between the leader's commit index and
         # the highest index present in the log
-        if rpc.body.leaderCommit > commitIndex:
-            commitIndex = min(rpc.body.leaderCommit, log_i - 1)
+        if rpc.body.leaderCommit > stateClass.getCommitIndex():
+            newCommitIndex = min(rpc.body.leaderCommit, log_i - 1)
+            stateClass.setCommitIndex(newCommitIndex)
 
         #sends positive reply
         #also informs the nextIndex to the leader to allow
         # the optimization of sending less times the same entry
-        reply(rpc, type="AppendEntriesRPCResponse", term=currentTerm, success=True, nextIndex=log_i, buffered_messages=requestsBuffer)
-        requestsBuffer.clear()
+        requestsBuffer = stateClass.getRequestsBuffer()
+        reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=True, nextIndex=log_i, buffered_messages=list(requestsBuffer))
+        #requestsBuffer.clear()
 
         #tries to apply some commands
         #only happens if there are commands 
         # that have been applied by the leader
-        tryUpdateLastApplied()
+        stateClass.tryUpdateLastApplied()
 
-    finally: lock.release()
+    finally: stateClass.lock.release()
 
 def handleAppendEntriesRPCResponse(response):
     global currentTerm, nextIndex, matchIndex, state, votedFor, log
 
     try:
 
-        lock.acquire()
+        stateClass.lock.acquire()
 
         # add forwarded messages from followers to log 
         bufferedMessages = response.body.buffered_messages
         for m in bufferedMessages:
-            addEntryToLog(m)  
+            stateClass.addEntryToLog(m)  
 
         #ignores in case it is no longer a leader
-        if state != 'Leader': return
+        if stateClass.getState() != 'Leader': return
 
         if response.body.success == False:
             #Check the reason why the success of the AppendEntriesRPC was false
@@ -612,10 +469,12 @@ def handleAppendEntriesRPCResponse(response):
             #if it was because the leader's term is old,
             # then this node must update its term and 
             # convert to follower
-            if currentTerm < response.body.term:
-                currentTerm = response.body.term
-                votedFor = None
-                changeStateTo('Follower')
+            if stateClass.getCurrentTerm() < response.body.term:
+                stateClass.setCurrentTerm(response.body.term)
+                #currentTerm = response.body.term
+                stateClass.setVotedFor(None)
+                #votedFor = None
+                stateClass.changeStateTo('Follower')
                 return;
             #otherwise, the follower must not have some 
             # entries that the leader assumed it had.
@@ -623,27 +482,30 @@ def handleAppendEntriesRPCResponse(response):
             # be decreased, and another AppendEntriesRPC must
             # be sent
             else:
-                nextIndex[response.src] -= 1
+                stateClass.decrementNextIndex(response.src)
+                #nextIndex[response.src] -= 1
                 sendAppendEntriesRPC(response.src, False)
 
         else:
             #the follower sends is nextIndex when the
             # AppendEntriesRPC is a success. This allows
             # the update the nextIndex and matchIndex
-            nextIndex[response.src] = response.body.nextIndex
-            matchIndex[response.src] = response.body.nextIndex - 1
+            stateClass.setNextIndex(response.src, response.body.nextIndex)
+            #nextIndex[response.src] = response.body.nextIndex
+            stateClass.setMatchIndex(response.src, response.body.nextIndex - 1 )
+            #matchIndex[response.src] = response.body.nextIndex - 1
 
             #Checks if the commitIndex can be incremented
-            updated = leaderTryUpdateCommitIndex()
+            updated = stateClass.leaderTryUpdateCommitIndex()
 
             #If the commitIndex was updated, then 
             # it can update the lastApplied and
             # apply one or more commands to the 
             # state machine
             if updated:
-                tryUpdateLastApplied()
+                stateClass.tryUpdateLastApplied()
 
-    finally: lock.release()
+    finally: stateClass.lock.release()
 
 
 ########### RequestVote RPC ###########
@@ -652,9 +514,9 @@ def handleAppendEntriesRPCResponse(response):
 # in the order mentioned previously
 #If no entry exists, then returns (0,0)
 def getLastLogEntryIndexAndTerm():
-    lastLogIndex = len(log)
+    lastLogIndex = stateClass.getNumNodes()
     lastLogTerm = 0
-    lastEntry = getLogEntry(lastLogIndex)
+    lastEntry = stateClass.getLogEntry(lastLogIndex)
     if lastEntry != None:
         lastLogTerm = lastEntry[1]
     return lastLogIndex, lastLogTerm
@@ -662,105 +524,117 @@ def getLastLogEntryIndexAndTerm():
 def broadcastRequestVoteRPC():
     lastLogIndex, lastLogTerm = getLastLogEntryIndexAndTerm() 
     broadcast(type="RequestVoteRPC", 
-              term=currentTerm,
-              candidateId=node_id,
+              term=stateClass.getCurrentTerm(),
+              candidateId=stateClass.getNodeId(),
               lastLogIndex=lastLogIndex,
               lastLogTerm=lastLogTerm)
 
 def handleRequestVoteRPC(rpc):
-    global currentTerm, state, votedFor
+    global currentTerm, stateClass, votedFor
     
     try:
-        lock.acquire()
+        stateClass.lock.acquire()
+        #logging.warning("CURRENT TERM: " +str(stateClass.getCurrentTerm()))
+        #logging.warning("RPC TERM: " + str(rpc.body.term))
+        if stateClass.getCurrentTerm() < rpc.body.term: 
 
-        if currentTerm < rpc.body.term: 
-            currentTerm = rpc.body.term
-            votedFor = rpc.body.candidateId
-            changeStateTo('Follower')
-            reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=currentTerm)
+            stateClass.setCurrentTerm(rpc.body.term)
+            #currentTerm = rpc.body.term
+            stateClass.setVotedFor(rpc.body.candidateId)
+            stateClass.changeStateTo('Follower')
+            reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=stateClass.getCurrentTerm())
             return
         
-        elif currentTerm > rpc.body.term:
-            reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=currentTerm)
+        elif stateClass.getCurrentTerm() > rpc.body.term:
+            reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
             return
         
         else: #currentTerm == rpc.body.term:
             
-            if state == 'Follower':
+            if stateClass.getState() == 'Follower':
 
                 #In case this follower as already voted in this current term
-                if votedFor != None:
+                votedFor = stateClass.getVotedFor()
+                if  votedFor != None:
                     if votedFor == rpc.body.candidateId:
-                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=currentTerm) 
+                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=stateClass.getCurrentTerm()) 
                     else:
-                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=currentTerm) 
+                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm()) 
                     return
 
                 #If it hasn't already voted in this term
                 lastLogIndex, lastLogTerm = getLastLogEntryIndexAndTerm() 
 
                 if lastLogTerm < rpc.body.lastLogTerm:
-                    votedFor = rpc.body.candidateId #votes for the candidate because it more up to date
+                    stateClass.setVotedFor(rpc.body.candidateId)
+                    #votedFor = rpc.body.candidateId #votes for the candidate because it more up to date
                     resetRaftTimeout() #resets timeout
-                    reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=currentTerm)
+                    reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=stateClass.getCurrentTerm())
 
                 elif lastLogTerm > rpc.body.lastLogTerm:
                     #rejects vote because it has a more up to date log than the candidate that sent the rpc
-                    reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=currentTerm)
+                    reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
 
                 else: # lastLogTerm == rpc.body.lastLogTerm:
                     if lastLogIndex > rpc.body.lastLogIndex:
                         #rejects vote because it has a bigger log than the candidate that sent the rpc
-                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=currentTerm)
+                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
                     
                     else: #lastLogIndex <= rpc.body.lastLogIndex:
-                        votedFor = rpc.body.candidateId
+                        stateClass.setVotedFor(rpc.body.candidateId)
+                        #votedFor = rpc.body.candidateId
                         resetRaftTimeout() #resets timeout
-                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=currentTerm)
+                        reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=stateClass.getCurrentTerm())
                 
 
-            elif state == 'Candidate': # is this response necessary? looks like wasted bandwidth
-                reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=currentTerm)
+            elif stateClass.getState() == 'Candidate': # is this response necessary? looks like wasted bandwidth
+                reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
                 return
             
             else: # state == 'Leader'
                 sendAppendEntriesRPC(rpc.body.candidateId, False)
                 return
 
-    finally: lock.release()
+    finally: stateClass.lock.release()
 
 
 def handleRequestVoteRPCResponse(response):
-    global currentTerm, state, votedFor, receivedVotes
+    global currentTerm, stateClass, votedFor, receivedVotes
 
     try:
 
-        lock.acquire()
+        stateClass.lock.acquire()
 
         #checks the term first, since receiving a higher term 
         # will result in the same action, regardless of the 
         # value of 'voteGranted'
-        if currentTerm < response.body.term:
-            currentTerm = response.body.term
-            changeStateTo('Follower')
-            votedFor = None
+        
+        if stateClass.getCurrentTerm() < response.body.term:
+            stateClass.setCurrentTerm(response.body.term)
+            #currentTerm = response.body.term
+            stateClass.changeStateTo('Follower')
+            stateClass.setVotedFor(None)
+            #votedFor = None
             return
 
         if response.body.voteGranted == True:
-            if currentTerm == response.body.term:
-                receivedVotes.add(response.src)
+            if stateClass.getCurrentTerm() == response.body.term:
+                logging.debug("vote received from : " + str(response.src))
+                stateClass.receiveVote(response.src)
+                
+                #receivedVotes.add(response.src)
                 resetRaftTimeout() # resets timeout
 
                 #if the size of the set 'receivedVotes' equals to the majority
                 # then the node can declare itself as leader
-                if len(receivedVotes) == majority:
-                    changeStateTo('Leader')
+                if stateClass.numberOfVotes() == stateClass.getMajority():
+                    stateClass.changeStateTo('Leader')
                     sendHeartBeatsToAll()
                     logging.warning(str(datetime.now()) + " :Became leader")
 
             # elif currentTerm > response.body.term: ignores because its an outdated reply
     
-    finally: lock.release()
+    finally: stateClass.lock.release()
 
 
 ########### Leader/Quorum Read ###########
@@ -775,7 +649,8 @@ def calculateProbabilityOfQueryingLeader(nodeCount):
 #Returns true if the follower should query the leader
 # to answer the client's read request
 def maybeQueryLeader():
-    return randomizer.uniform(0,100) < probReadFromLeader
+    randomizer = stateClass.getRandomizer()
+    return randomizer.uniform(0,100) < stateClass.getProbReadFromLeader()
 
 
 def getMostUpdatedValue(answers):
@@ -798,18 +673,19 @@ def addReadTimeout(readID):
 #### Message Handlers ####
 
 def handleLeaderRead(msg):
-    lock.acquire()
+    stateClass.lock.acquire()
 
-    if state == 'Leader':
-        if msg.body.key in stateMachine:
-            value,_ = stateMachine.get(msg.body.key)
+    if stateClass.getState() == 'Leader':
+        if stateClass.keyInStateMachine(msg.body.key):
+            value,_ = stateClass.getValueFromStateMachine(msg.body.key)
+            #value,_ = stateMachine.get(msg.body.key)
             reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=True, value=value)
         else:
             reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=True, value=None)
     else:
         reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=False, value=None)
 
-    lock.release()
+    stateClass.lock.release()
 
 #TODO - vale a pena verificar mesmo se ainda é o leader atual? Se nao, é preciso eliminar os dados desnecessarios no handleRead
 def handleLeaderReadResponse(msg):
@@ -844,9 +720,10 @@ def handleLeaderReadResponse(msg):
             reply(m[0],type="error",code=0)
 
 def handleQuorumRead(msg):
-    lock.acquire()
-    if msg.body.key in stateMachine:
-        value,(index,term) = stateMachine.get(msg.body.key)
+    stateClass.lock.acquire()
+    if stateClass.keyInStateMachine(msg.body.key):
+        value,(index,term) = stateClass.getValueFromStateMachine(msg.body.key)
+        #value,(index,term) = stateMachine.get(msg.body.key)
         reply(msg, type="read_quorum_resp", 
                    read_id=msg.body.read_id, 
                    value=value, 
@@ -858,32 +735,33 @@ def handleQuorumRead(msg):
                    value=None, 
                    index=0, 
                    term=0)
-    lock.release()
+    stateClass.lock.release()
 
 def handleQuorumReadResponse(msg):
-    lock.acquire()
+    stateClass.lock.acquire()
     m = activeReads.get(msg.body.read_id)
-    
+    node_id = stateClass.getNodeId()
     if m == None:
-        lock.release()
+        stateClass.lock.release()
         return
     
     answers = m[2]
     answers[msg.src] = (msg.body.value, msg.body.index, msg.body.term)
 
-    if len(answers) + 1 == majority:
+    if len(answers) + 1 == stateClass.getMajority():
         activeReads.pop(msg.body.read_id) # delete active read entry
         key = m[0].body.key # gets key from client's read request
         
-        if key in stateMachine:
-            value, (index, term) = stateMachine.get(key)
+        if stateClass.keyInStateMachine(key):
+            value, (index,term) = stateClass.getValueFromStateMachine(key)
+            #value, (index, term) = stateMachine.get(key)
             answers[node_id] = (value, index, term)
         else:
             answers[node_id] = (None, 0, 0)
 
         reply(m[0], type="read_ok", value=getMostUpdatedValue(answers))
 
-    lock.release()
+    stateClass.lock.release()
 
 ########### Main Loop ###########
 

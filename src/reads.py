@@ -3,7 +3,7 @@ from threading import Lock, Thread
 from math import comb
 from random import Random
 from ms import reply, send
-from raftVars import RaftVars
+from state import State as RaftVars
 
 class ReadsState:
     def __init__(self, node_id, nodeCount, rv : RaftVars):
