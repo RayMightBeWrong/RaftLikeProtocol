@@ -16,7 +16,7 @@ def broadcast(stateClass : State, **body):
 # in the order mentioned previously
 #If no entry exists, then returns (0,0)
 def getLastLogEntryIndexAndTerm(stateClass : State):
-    lastLogIndex = stateClass.getNumNodes()
+    lastLogIndex = stateClass.getLogSize()
     lastLogTerm = 0
     lastEntry = stateClass.getLogEntry(lastLogIndex)
     if lastEntry != None:

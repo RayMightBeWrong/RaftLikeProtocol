@@ -71,7 +71,9 @@ class State:
         self.log.append(entry)
     
     def removeLogEntry(self, index):
-        self.log.pop(index)
+        i = index - 1
+        if i < len(self.log):
+            del self.log[i]
 
     def updateRaftTout(self):
         self.raftTout = max(0, self.raftTout - self.sendAppendEntriesRPCTout)
@@ -155,20 +157,24 @@ class State:
         msg, term = self.getLogEntry(logIndex)
         if msg.body.type == 'write':
             self.stateMachine[msg.body.key] = (msg.body.value, (logIndex,term))
+            logging.debug("[Write] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(msg.body.value))
             if self.state == 'Leader':
                 reply(msg, type="write_ok")
-        
-        if msg.body.type == 'cas':
+    
+        elif msg.body.type == 'cas':
             if msg.body.key not in self.stateMachine:
+                logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " error: Key does not exist")
                 if self.state == 'Leader':
                     reply(msg, type="error", code=20)
             else:
                 value,_ = self.stateMachine.get(msg.body.key)
                 if value == getattr(msg.body,"from"):
-                    self.stateMachine[msg.body.key] = (msg.body.to,(logIndex,self.currentTerm))
+                    logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(value) + " from: " + str(getattr(msg.body,"from")) + " to: " + str(msg.body.to))
+                    self.stateMachine[msg.body.key] = (msg.body.to, (logIndex,term))
                     if self.state == 'Leader':
                         reply(msg, type="cas_ok")
                 else:
+                    logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(value) + " from: " + str(getattr(msg.body,"from")) + "[FAILED] to: " + str(msg.body.to))
                     if self.state == 'Leader':
                         reply(msg, type="error", code=22)
     
@@ -245,7 +251,7 @@ class State:
     #'index' starts at 1, therefore to get the entry we want, this 
     #  variable must be decremented by 1 unit
     def getLogEntry(self, index : int):
-        i = index - 1 
+        i = index - 1
         if i < 0: return None
         else:
             if i < len(self.log):

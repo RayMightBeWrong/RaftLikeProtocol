@@ -1,5 +1,6 @@
 from ms import send, reply
 from state import State
+import logging
 
 ########### AppendEntries RPC ###########
 #(Invoked by leader to replicate log entries; also used as heartbeat)
@@ -15,7 +16,7 @@ def sendAppendEntriesRPC(stateClass : State, dest, heartbeatOnly):
     prevLogIndex = nextI - 1
     prevLogTerm = 0
     if prevLogIndex > 0:
-        prevEntry = stateClass.getLogEntry(prevLogIndex) #TODO -> use state class function 
+        prevEntry = stateClass.getLogEntry(prevLogIndex)
         prevLogTerm = prevEntry[1] 
 
     entries = []
@@ -26,7 +27,7 @@ def sendAppendEntriesRPC(stateClass : State, dest, heartbeatOnly):
          dest, 
          type="AppendEntriesRPC", 
          term=stateClass.getCurrentTerm(),
-         leaderId=stateClass.getLeaderId(),
+         leaderId=stateClass.getNodeId(),
          leaderCommit=stateClass.getCommitIndex(),
          prevLogIndex=prevLogIndex,
          prevLogTerm=prevLogTerm,
@@ -54,16 +55,12 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
             reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=False, buffered_messages=[])
             return;
         elif stateClass.getCurrentTerm() < rpc.body.term:
-            stateClass.setCurrentTerm(rpc.body.term)
-            #currentTerm = rpc.body.term #update own term
-            #votedFor = None
+            stateClass.setCurrentTerm(rpc.body.term) #update own term
             stateClass.setVotedFor(None)
         
         #ensures that the state is of follower and resets election timeout
-        #changeStateTo('Follower')
         stateClass.changeStateTo('Follower')
         stateClass.setLeader(rpc.src)
-        #leader_id = rpc.src
 
         if rpc.body.prevLogIndex != 0:
             #check existence of the entry with prevLogIndex sent by the leader
@@ -86,12 +83,13 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
             #if the entry exists and it does not match the one sent by the leader,
             # then that entry and the ones that follow must be removed from the log
             if node_entry != None and node_entry[1] != leader_entry[1]:
-                for j in range(log_i - 1, stateClass.getLogSize()):
-                    stateClass.removeLogEntry(log_i - 1 )
+                for j in range(log_i, stateClass.getLogSize() + 1):
+                    #deleting the same position multiple times, because deletes 
+                    # left shift elements from the right
+                    stateClass.removeLogEntry(log_i)
 
             #appends the new entry to the log
             stateClass.logAppendEntry(leader_entry)
-            #log.append(leader_entry)
 
             log_i += 1
 
@@ -99,14 +97,15 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
         # between the leader's commit index and
         # the highest index present in the log
         if rpc.body.leaderCommit > stateClass.getCommitIndex():
-            newCommitIndex = min(rpc.body.leaderCommit, log_i - 1)
+            newCommitIndex = min(rpc.body.leaderCommit, log_i - 1) # 'log_i - 1' because it is incremented in the previous loop
             stateClass.setCommitIndex(newCommitIndex)
+            logging.debug("Updated commit index to " + str(stateClass.getCommitIndex()) + " (lastApplied: " + str(stateClass.lastApplied) + ") triggered by " + rpc.src + "(msg_id:" + str(rpc.body.msg_id) + ")")
 
         #sends positive reply
         #also informs the nextIndex to the leader to allow
         # the optimization of sending less times the same entry
         requestsBuffer = stateClass.getRequestsBuffer()
-        reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=True, nextIndex=log_i, buffered_messages=list(requestsBuffer))
+        reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=True, nextIndex=log_i, buffered_messages=requestsBuffer)
         stateClass.clearRequestsBuffer()
 
         #tries to apply some commands
