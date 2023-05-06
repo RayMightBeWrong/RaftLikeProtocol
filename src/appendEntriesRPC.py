@@ -77,9 +77,7 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
         #used to keep track of the index that the entries have
         log_i = rpc.body.prevLogIndex + 1 
         
-        logging.warning("Received AppendEntriesRPC msg_id:" + str(rpc.body.msg_id))
         for i in range(0, len(rpc.body.entries)):
-
             leader_entry = rpc.body.entries[i]
             node_entry = stateClass.getLogEntry(log_i) 
 
@@ -93,8 +91,6 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
 
             #appends the new entry to the log
             stateClass.logInsertEntryAt(leader_entry, log_i)
-            lindex,lterm = stateClass.getLastLogEntryIndexAndTerm()
-            logging.warning("Appended entry (index: " + str(log_i) + "): " + str(leader_entry) + "\nLast Entry (index: " + str(lindex) + " term: " + str(lterm) + ") = " + str(stateClass.getLogEntry(stateClass.getLogSize())))
 
             log_i += 1
 
@@ -104,7 +100,6 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
         if rpc.body.leaderCommit > stateClass.getCommitIndex():
             newCommitIndex = min(rpc.body.leaderCommit, stateClass.getLogSize())
             stateClass.setCommitIndex(newCommitIndex)
-            logging.debug("Updated commit index to " + str(stateClass.getCommitIndex()) + " (lastApplied: " + str(stateClass.lastApplied) + ") triggered by " + rpc.src + "(msg_id:" + str(rpc.body.msg_id) + ")")
 
         #sends positive reply
         #also informs the nextIndex to the leader to allow

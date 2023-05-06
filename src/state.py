@@ -77,7 +77,6 @@ class State:
     def removeLogEntry(self, index):
         i = index - 1
         if i < len(self.log):
-            logging.warning("Removing entry(index:" + str(index) +"): " + self.log[i])
             del self.log[i]
 
     def updateRaftTout(self):
@@ -162,24 +161,20 @@ class State:
         msg, term = self.getLogEntry(logIndex)
         if msg.body.type == 'write':
             self.stateMachine[msg.body.key] = (msg.body.value, (logIndex,term))
-            logging.debug("[Write] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(msg.body.value))
             if self.state == 'Leader':
                 reply(msg, type="write_ok")
     
         elif msg.body.type == 'cas':
             if msg.body.key not in self.stateMachine:
-                logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " error: Key does not exist")
                 if self.state == 'Leader':
                     reply(msg, type="error", code=20)
             else:
                 value,_ = self.stateMachine.get(msg.body.key)
                 if value == getattr(msg.body,"from"):
-                    logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(value) + " from: " + str(getattr(msg.body,"from")) + " to: " + str(msg.body.to))
                     self.stateMachine[msg.body.key] = (msg.body.to, (logIndex,term))
                     if self.state == 'Leader':
                         reply(msg, type="cas_ok")
                 else:
-                    logging.debug("[CAS] Applied index:" + str(logIndex) + " term: " + str(term) + " key: " + str(msg.body.key) + " value: " + str(value) + " from: " + str(getattr(msg.body,"from")) + "[FAILED] to: " + str(msg.body.to))
                     if self.state == 'Leader':
                         reply(msg, type="error", code=22)
     
