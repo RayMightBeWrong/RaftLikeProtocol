@@ -11,14 +11,3 @@ def broadcast(stateClass : State, **body):
         node_id = stateClass.getNodeId()
         if n != node_id:
             send(node_id, n, **body)
-
-#Returns a tuple containing the index and term of the last log's entry, 
-# in the order mentioned previously
-#If no entry exists, then returns (0,0)
-def getLastLogEntryIndexAndTerm(stateClass : State):
-    lastLogIndex = stateClass.getLogSize()
-    lastLogTerm = 0
-    lastEntry = stateClass.getLogEntry(lastLogIndex)
-    if lastEntry != None:
-        lastLogTerm = lastEntry[1]
-    return lastLogIndex, lastLogTerm

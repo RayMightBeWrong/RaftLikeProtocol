@@ -68,6 +68,8 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
             # present in the leader's log, then a false response must be sent
             prevEntry = stateClass.getLogEntry(rpc.body.prevLogIndex)
             if prevEntry == None or prevEntry[1] != rpc.body.prevLogTerm: 
+                #The 'success' is False, but it doesn't mean that the node should stop following the leader
+                # so the messages in the requests buffer can be sent to the leader 
                 reply(rpc, type="AppendEntriesRPCResponse", term=stateClass.getCurrentTerm(), success=False, buffered_messages=stateClass.getRequestsBuffer())
                 stateClass.clearRequestsBuffer()
                 return;
@@ -75,6 +77,7 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
         #used to keep track of the index that the entries have
         log_i = rpc.body.prevLogIndex + 1 
         
+        logging.warning("Received AppendEntriesRPC msg_id:" + str(rpc.body.msg_id))
         for i in range(0, len(rpc.body.entries)):
 
             leader_entry = rpc.body.entries[i]
@@ -89,7 +92,9 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
                     stateClass.removeLogEntry(log_i)
 
             #appends the new entry to the log
-            stateClass.logAppendEntry(leader_entry)
+            stateClass.logInsertEntryAt(leader_entry, log_i)
+            lindex,lterm = stateClass.getLastLogEntryIndexAndTerm()
+            logging.warning("Appended entry (index: " + str(log_i) + "): " + str(leader_entry) + "\nLast Entry (index: " + str(lindex) + " term: " + str(lterm) + ") = " + str(stateClass.getLogEntry(stateClass.getLogSize())))
 
             log_i += 1
 
@@ -97,7 +102,7 @@ def handleAppendEntriesRPC(stateClass : State, rpc):
         # between the leader's commit index and
         # the highest index present in the log
         if rpc.body.leaderCommit > stateClass.getCommitIndex():
-            newCommitIndex = min(rpc.body.leaderCommit, log_i - 1) # 'log_i - 1' because it is incremented in the previous loop
+            newCommitIndex = min(rpc.body.leaderCommit, stateClass.getLogSize())
             stateClass.setCommitIndex(newCommitIndex)
             logging.debug("Updated commit index to " + str(stateClass.getCommitIndex()) + " (lastApplied: " + str(stateClass.lastApplied) + ") triggered by " + rpc.src + "(msg_id:" + str(rpc.body.msg_id) + ")")
 
@@ -125,7 +130,7 @@ def handleAppendEntriesRPCResponse(stateClass : State, response):
         # add forwarded messages from followers to log 
         bufferedMessages = response.body.buffered_messages
         for m in bufferedMessages:
-            stateClass.addEntryToLog(m)  
+            stateClass.addEntryToLog(m)
 
         #ignores in case it is no longer a leader
         if stateClass.getState() != 'Leader': return

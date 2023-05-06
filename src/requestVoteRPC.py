@@ -1,5 +1,5 @@
 import logging, time
-from auxiliarFunctions import broadcast, getLastLogEntryIndexAndTerm
+from auxiliarFunctions import broadcast
 from ms import reply
 from state import State
 from appendEntriesRPC import sendAppendEntriesRPC, sendHeartBeatsToAll
@@ -8,7 +8,7 @@ from appendEntriesRPC import sendAppendEntriesRPC, sendHeartBeatsToAll
 ########### RequestVote RPC ###########
 
 def broadcastRequestVoteRPC(stateClass : State):
-    lastLogIndex, lastLogTerm = getLastLogEntryIndexAndTerm(stateClass) 
+    lastLogIndex, lastLogTerm = stateClass.getLastLogEntryIndexAndTerm() 
     broadcast(stateClass,
               type="RequestVoteRPC", 
               term=stateClass.getCurrentTerm(),
@@ -48,7 +48,7 @@ def handleRequestVoteRPC(stateClass : State, rpc):
                     return
 
                 #If it hasn't already voted in this term
-                lastLogIndex, lastLogTerm = getLastLogEntryIndexAndTerm(stateClass) 
+                lastLogIndex, lastLogTerm = stateClass.getLastLogEntryIndexAndTerm() 
 
                 if lastLogTerm < rpc.body.lastLogTerm:
                     stateClass.setVotedFor(rpc.body.candidateId)
@@ -113,6 +113,7 @@ def handleRequestVoteRPCResponse(stateClass : State, response):
                     #Add client requests, present in the requests buffer, to the log
                     for m in stateClass.getRequestsBuffer():
                         stateClass.addEntryToLog(m)
+                        
                     #Clear the requests buffer
                     stateClass.clearRequestsBuffer()
                     

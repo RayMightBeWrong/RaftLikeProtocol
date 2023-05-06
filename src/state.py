@@ -70,9 +70,14 @@ class State:
     def logAppendEntry(self, entry):
         self.log.append(entry)
     
+    def logInsertEntryAt(self, entry, index):
+        i = index - 1
+        self.log.insert(i, entry)
+
     def removeLogEntry(self, index):
         i = index - 1
         if i < len(self.log):
+            logging.warning("Removing entry(index:" + str(index) +"): " + self.log[i])
             del self.log[i]
 
     def updateRaftTout(self):
@@ -181,6 +186,16 @@ class State:
     def decrementNextIndex(self, node_id):
         self.nextIndex[node_id] -= 1
 
+    #Returns a tuple containing the index and term of the last log's entry, 
+    # in the order mentioned previously
+    #If no entry exists, then returns (0,0)
+    def getLastLogEntryIndexAndTerm(self):
+        lastLogIndex = self.getLogSize()
+        lastLogTerm = 0
+        lastEntry = self.getLogEntry(lastLogIndex)
+        if lastEntry != None:
+            lastLogTerm = lastEntry[1]
+        return lastLogIndex, lastLogTerm
                     
     ########################## GETTERS AND SETTERS ##########################
 
