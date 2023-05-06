@@ -6,8 +6,8 @@ from ms import reply, send
 from state import State as RaftVars
 
 class ReadsState:
-    def __init__(self, node_id, nodeCount, rv : RaftVars):
-        self.probReadFromLeader = calculateProbabilityOfQueryingLeader(nodeCount) # Probability(%) of querying the leader instead of performing a quorum read
+    def __init__(self, rv : RaftVars):
+        self.probReadFromLeader = calculateProbabilityOfQueryingLeader(rv.getNumNodes()) # Probability(%) of querying the leader instead of performing a quorum read
 
         self.readTout = 300 # read timeout, i.e., amount of time to wait before trying to redo the reading operation
         self.idleTime = 100 # when there are no read entries, the thread sleeps this amount of time, before checking again 
@@ -15,6 +15,7 @@ class ReadsState:
 
         #To associate an ID with the read requests from the clients
         self.nextReadID = 0 
+
         #Dictionary to map an ID to a read request,
         # and in case of a quorum read, store the answers
         # of the contacted nodes-
@@ -23,13 +24,14 @@ class ReadsState:
         # 1. (msg, "quorum", {node1: (value1, index1, term1), node2: (value2, index2, term2)})
         # 2. (msg, "leader", leaderID)
         self.activeReads = dict()
+
         # key: read ID ---> value: (timeout, nr of attemps left) 
         self.readTimeouts = dict()
         
         self.readsLock = Lock() # exclusive lock for read operations. Not used in auxiliary functions.
-        self.randomizer = Random(node_id) # For operations that require randomness. The seed is the name of the node itself
-        self.readTimeoutsThread = self.__initReadTimeoutsThread() # Thread used to control the timeouts and issue new read attempts
+        self.randomizer = Random(rv.getNodeId()) # For operations that require randomness. The seed is the name of the node itself
         self.rv = rv # Raft Variables
+        self.readTimeoutsThread = self.__initReadTimeoutsThread() # Thread used to control the timeouts and issue new read attempts
 
     #Returns true if the follower should query the leader
     # to answer the client's read request
@@ -51,11 +53,11 @@ class ReadsState:
 
     #Adds a new leader read entry and timeout
     def addNewLeaderRead(self, msg, leaderID) -> int:
-        return self.addNewRead(msg, "leader", leaderID)
+        return self.__addNewRead(msg, "leader", leaderID)
     
     #Adds a new quorum read entry and timeout
     def addNewQuorumRead(self, msg) -> int:
-        return self.addNewRead(msg, "quorum", [])
+        return self.__addNewRead(msg, "quorum", {})
 
     #Deletes read entry and timeout
     def deleteRead(self, readID):
@@ -76,7 +78,7 @@ class ReadsState:
     # - a new read ID, if the attempt is successful 
     # - 'None' if there is no entry with the given 'readID', or if there are no more attempts.
     #The function does not issue another read operation.
-    def decreaseAttempts(self, readID, readType, leaderID) -> int:
+    def decreaseAttempts(self, readID, readType, leaderID) -> int | None:
         pastEntry = self.activeReads[readID]
 
         #If the entry does not exist, cannot decrease nr of attempts
@@ -93,9 +95,9 @@ class ReadsState:
             # number of attempts is zero or positive.
             if attempts >= 0:
                 if readType == 'quorum':
-                    self.addNewQuorumRead(pastEntry[0])
+                    return self.addNewQuorumRead(pastEntry[0])
                 else:
-                    self.addNewLeaderRead(pastEntry[0], leaderID)
+                    return self.addNewLeaderRead(pastEntry[0], leaderID)
             else:
                 reply(pastEntry[0], type="error", code=0) # replies to client with timeout error
                 return None
@@ -107,7 +109,7 @@ class ReadsState:
     ########### Quorum/Leader Read Timeouts ###########
 
     def __initReadTimeoutsThread(self):
-        self.readTimeoutsThread = Thread(target=self.readTimeoutsLoop(), args=())
+        self.readTimeoutsThread = Thread(target=self.readTimeoutsLoop, args=())
         self.readTimeoutsThread.start()
 
     def readTimeoutsLoop(self):
@@ -135,7 +137,7 @@ class ReadsState:
                         self.readsLock.release()
                         self.rv.lock.acquire()
                         self.readsLock.acquire()
-
+                        
                         #Only redo read operation if there are attempts left, otherwise
                         # inform the client that it was not possible
                         if attempts > 0:
@@ -146,20 +148,18 @@ class ReadsState:
                             # with a certain probability. 
                             if self.rv.leader_id != None and self.maybeQueryLeader():
                                 #add new leader read entry and set a timeout
-                                readID = self.addNewLeaderRead(m[0], self.rv.leader_id) 
-                                if readID != None:
-                                    logging.info("Trying leader read(ID=" + str(readID) + "): " + str(m[0]))
-                                    #Ask leader for the value
-                                    send(self.rv.node_id, self.rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
+                                readID = self.decreaseAttempts(readID, "leader", self.rv.leader_id) 
+                                logging.info("Trying leader read(ID=" + str(readID) + "): " + str(m[0]))
+                                #Ask leader for the value
+                                send(self.rv.getNodeId(), self.rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
                             else:
                                 #add new quorum read entry and set a timeout
-                                readID = self.addNewQuorumRead(m[0])
-                                if readID != None:
-                                    logging.info("Trying quorum read(ID=" + str(readID) + "): " + str(m[0]))
-                                    #broadcast to a random subset of nodes (excluding the node itself and the leader). 
-                                    #The number of nodes must be enough to form a majority
-                                    broadcastToRandomSubset(self.rv.node_id, self.rv.node_ids, self.rv.leader_id, self.randomizer, 
-                                                            type="read_quorum", read_id=readID, key=m[0].body.key)
+                                readID = self.decreaseAttempts(readID, "quorum", None)
+                                logging.info("Trying quorum read(ID=" + str(readID) + "): " + str(m[0]))
+                                #broadcast to a random subset of nodes (excluding the node itself and the leader). 
+                                #The number of nodes must be enough to form a majority
+                                broadcastToRandomSubset(self.rv.getNodeId(), self.rv.getNodes(), self.rv.leader_id, self.randomizer, 
+                                                        type="read_quorum", read_id=readID, key=m[0].body.key)
 
                             self.rv.lock.release()
                         else:
@@ -173,9 +173,13 @@ class ReadsState:
 
             # if the lowestTout changed sleep until that time
             if lowestTout != float("inf"):
-                time.sleep(time.time() - lowestTout)
+                sleepTime = time.time() - lowestTout
+                if sleepTime > 0: time.sleep(sleepTime)
             else:
                 time.sleep(self.idleTime / 1000)
+
+    #################################### // End of ReadsState class // ####################################
+
 
 ########## Auxiliary Functions ##########
 
@@ -209,7 +213,7 @@ def broadcastToRandomSubset(node_id, node_ids, leader_id, randomizer, **body):
     #Random selection of subset size. The value must be at least N // 2, 
     # so that a majority can be reached when counting the node itself.
     #The maximum value is number of nodes excluding the leader and the node itself (N - 2).
-    subsetSize = randomizer.randint(nodeCount // 2, nodeCount - 1)
+    subsetSize = randomizer.randint(nodeCount // 2, nodeCount - 2)
 
     #Instead of performing 'subsetSize' number of operations,
     # by removing, to the total number of nodes, 2 to exclude 
@@ -232,13 +236,13 @@ def broadcastToRandomSubset(node_id, node_ids, leader_id, randomizer, **body):
 
     # Removes 'nrRandRemoves' nodes randomly
     for i in range(0, nrRandRemoves):
-        subset.pop(randomizer.randint(0,len(subset)))
+        subset.pop(randomizer.randint(0, len(subset) - 1))
 
     # Broadcasts to the subset
     for n in subset:
         send(node_id, n, **body)
     
-    logging.info("Quorum(readID= " + str(body["read_id"]) + "): " + str(subset))
+    logging.info("Quorum(readID=" + str(body["read_id"]) + "): " + str(subset))
 
 ########## Message Handlers ##########
 
@@ -247,9 +251,9 @@ def handleLeaderRead(rv : RaftVars, msg):
     rv.lock.acquire()
 
     if rv.state == 'Leader':
-        if msg.body.key in rv.stateMachine:
-            value,_ = rv.stateMachine.get(msg.body.key)
-            reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=True, value=value)
+        result = rv.stateMachine.get(msg.body.key)
+        if result != None:
+            reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=True, value=result[0])
         else:
             reply(msg, type='read_leader_resp', read_id=msg.body.read_id, success=True, value=None)
     else:
@@ -283,7 +287,7 @@ def handleLeaderReadResponse(rv : RaftVars, rs: ReadsState, msg):
         if rv.leader_id != None and rs.maybeQueryLeader():
             readID = rs.decreaseAttempts(readID, "leader", rv.leader_id)
             if readID != None:
-                send(rv.node_id, rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
+                send(rv.getNodeId(), rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
                 logging.info("Trying leader read(ID=" + str(readID) + "): " + str(m[0]))
         else:
             readID = rs.decreaseAttempts(readID, "quorum", None)
@@ -291,7 +295,7 @@ def handleLeaderReadResponse(rv : RaftVars, rs: ReadsState, msg):
                 logging.info("Trying quorum read(ID=" + str(readID) + "): " + str(msg))
                 #broadcast to a random subset of nodes (excluding the node itself and the leader). 
                 #The number of nodes must be enough to form a majority
-                broadcastToRandomSubset(rv.node_id, rv.node_ids, rv.leader_id, rs.randomizer, 
+                broadcastToRandomSubset(rv.getNodeId(), rv.getNodes(), rv.leader_id, rs.randomizer, 
                                         type="read_quorum", read_id=readID, key=m[0].body.key)
 
         rs.readsLock.release()
@@ -299,8 +303,10 @@ def handleLeaderReadResponse(rv : RaftVars, rs: ReadsState, msg):
 #Handles quorum read request
 def handleQuorumRead(rv : RaftVars, msg):
     rv.lock.acquire()
-    if msg.body.key in rv.stateMachine:
-        value,(index,term) = rv.stateMachine.get(msg.body.key)
+
+    result = rv.stateMachine.get(msg.body.key)
+    if result != None:
+        value,(index,term) = result
         reply(msg, type="read_quorum_resp", 
                    read_id=msg.body.read_id, 
                    value=value, 
@@ -343,12 +349,14 @@ def handleQuorumReadResponse(rv : RaftVars, rs: ReadsState, msg):
 
         #Gets key from client's read request
         key = m[0].body.key
+
         #Adds own answer to the dictionary of answers
-        if key in rv.stateMachine:
-            value, (index, term) = rv.stateMachine.get(key)
-            answers[rv.node_id] = (value, index, term)
+        result = rv.stateMachine.get(key)
+        if result != None:
+            value, (index, term) = result
+            answers[rv.getNodeId()] = (value, index, term)
         else:
-            answers[rv.node_id] = (None, 0, 0)
+            answers[rv.getNodeId()] = (None, 0, 0)
 
         #Replies to client with the most updated value
         reply(m[0], type="read_ok", value=getMostUpdatedValue(answers))
