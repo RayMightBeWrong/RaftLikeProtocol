@@ -79,7 +79,7 @@ class ReadsState:
     # - 'None' if there is no entry with the given 'readID', or if there are no more attempts.
     #The function does not issue another read operation.
     def decreaseAttempts(self, readID, readType, leaderID) -> int | None:
-        pastEntry = self.activeReads[readID]
+        pastEntry = self.activeReads.get(readID)
 
         #If the entry does not exist, cannot decrease nr of attempts
         if pastEntry != None:
@@ -125,14 +125,9 @@ class ReadsState:
 
                 #if the read timed out, handle the client's read request again
                 if tout < time.time():
-                    attempts -= 1
-                    #del readTimeouts[readID] # removes read timeout entry
                     
                     m = self.getReadEntry(readID)
-                    if m != None:
-                        #del activeReads[readID] # delete active read entry
-                        self.deleteRead(readID) # deletes read entry and timeout                    
-
+                    if m != None:             
                         #acquire the locks in the correct order to avoid deadlock
                         self.readsLock.release()
                         self.rv.lock.acquire()
@@ -149,17 +144,19 @@ class ReadsState:
                             if self.rv.leader_id != None and self.maybeQueryLeader():
                                 #add new leader read entry and set a timeout
                                 readID = self.decreaseAttempts(readID, "leader", self.rv.leader_id) 
-                                logging.info("Trying leader read(ID=" + str(readID) + "): " + str(m[0]))
-                                #Ask leader for the value
-                                send(self.rv.getNodeId(), self.rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
+                                if readID != None:
+                                    logging.info("Trying leader read(ID=" + str(readID) + "): " + str(m[0]))
+                                    #Ask leader for the value
+                                    send(self.rv.getNodeId(), self.rv.leader_id, type="read_leader", read_id=readID, key=m[0].body.key)
                             else:
                                 #add new quorum read entry and set a timeout
                                 readID = self.decreaseAttempts(readID, "quorum", None)
-                                logging.info("Trying quorum read(ID=" + str(readID) + "): " + str(m[0]))
-                                #broadcast to a random subset of nodes (excluding the node itself and the leader). 
-                                #The number of nodes must be enough to form a majority
-                                broadcastToRandomSubset(self.rv.getNodeId(), self.rv.getNodes(), self.rv.leader_id, self.randomizer, 
-                                                        type="read_quorum", read_id=readID, key=m[0].body.key)
+                                if readID != None:
+                                    logging.info("Trying quorum read(ID=" + str(readID) + "): " + str(m[0]))
+                                    #broadcast to a random subset of nodes (excluding the node itself and the leader). 
+                                    #The number of nodes must be enough to form a majority
+                                    broadcastToRandomSubset(self.rv.getNodeId(), self.rv.getNodes(), self.rv.leader_id, self.randomizer, 
+                                                            type="read_quorum", read_id=readID, key=m[0].body.key)
 
                             self.rv.lock.release()
                         else:
@@ -297,7 +294,6 @@ def handleLeaderReadResponse(rv : RaftVars, rs: ReadsState, msg):
                 #The number of nodes must be enough to form a majority
                 broadcastToRandomSubset(rv.getNodeId(), rv.getNodes(), rv.leader_id, rs.randomizer, 
                                         type="read_quorum", read_id=readID, key=m[0].body.key)
-
         rs.readsLock.release()
 
 #Handles quorum read request

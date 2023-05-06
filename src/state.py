@@ -72,7 +72,8 @@ class State:
     
     def logInsertEntryAt(self, entry, index):
         i = index - 1
-        self.log.insert(i, entry)
+        if i >= 0:
+            self.log.insert(i, entry)
 
     def removeLogEntry(self, index):
         i = index - 1
