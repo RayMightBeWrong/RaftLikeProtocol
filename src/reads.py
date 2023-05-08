@@ -58,6 +58,14 @@ class ReadsState:
     #Adds a new quorum read entry and timeout
     def addNewQuorumRead(self, msg) -> int:
         return self.__addNewRead(msg, "quorum", {})
+    
+    #Adds a new quorum read entry and timeout
+    def addNewQuorumReadWithAttempts(self, msg, attempts) -> int:
+        readID = self.nextReadID
+        self.nextReadID += 1
+        self.activeReads[readID] = (msg, "quorum", {})
+        self.readTimeouts[readID] = (time.time() + self.readTout / 1000, attempts)
+        return readID
 
     #Deletes read entry and timeout
     def deleteRead(self, readID):
@@ -85,7 +93,6 @@ class ReadsState:
         if pastEntry != None:
             #Gets the attempts and decreases it by one unit
             _,attempts = self.readTimeouts[readID]
-            attempts -= 1
             
             #Deletes entry and timeout
             del self.activeReads[readID]
@@ -93,13 +100,13 @@ class ReadsState:
 
             #Can only add another entry if the 
             # number of attempts is zero or positive.
-            if attempts >= 0:
+            if attempts > 0:
                 if readType == 'quorum':
-                    return self.addNewQuorumRead(pastEntry[0])
+                    return self.addNewQuorumReadWithAttempts(pastEntry[0], attempts - 1)
                 else:
                     return self.addNewLeaderRead(pastEntry[0], leaderID)
             else:
-                reply(pastEntry[0], type="error", code=0) # replies to client with timeout error
+                reply(pastEntry[0], type="error", code=11) # replies to client with timeout error
                 return None
         else:
             return None
@@ -160,7 +167,7 @@ class ReadsState:
 
                             self.rv.lock.release()
                         else:
-                            reply(m[0],type="error",code=0)
+                            reply(m[0], type="error", code=11) # replies to client with timeout error
                             
                 #else tries to update the 'lowestTout' to set the sleep time until the next 
                 elif tout < lowestTout:
