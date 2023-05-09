@@ -21,20 +21,20 @@ def handleRequestVoteRPC(stateClass : State, rpc):
         stateClass.lock.acquire()
         #logging.warning("CURRENT TERM: " +str(stateClass.getCurrentTerm()))
         #logging.warning("RPC TERM: " + str(rpc.body.term))
+        
+        #If the current term is less than the one from the RPC
+        # then the node updates its term to match the one from
+        # the RPC and converts to a follower.
+        #In the next if statements, the node will check if
+        # the log of the node that sent the RPC is more updated,
+        # and if it is, the vote will be granted.
         if stateClass.getCurrentTerm() < rpc.body.term: 
-
             stateClass.setCurrentTerm(rpc.body.term)
-            #currentTerm = rpc.body.term
-            stateClass.setVotedFor(rpc.body.candidateId)
+            stateClass.setVotedFor(None)
             stateClass.changeStateTo('Follower')
-            reply(rpc, type="RequestVoteRPCResponse", voteGranted=True, term=stateClass.getCurrentTerm())
-            return
         
-        elif stateClass.getCurrentTerm() > rpc.body.term:
-            reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
-            return
         
-        else: #currentTerm == rpc.body.term:
+        if stateClass.getCurrentTerm() == rpc.body.term:
             
             if stateClass.getState() == 'Follower':
 
@@ -79,6 +79,12 @@ def handleRequestVoteRPC(stateClass : State, rpc):
             else: # state == 'Leader'
                 sendAppendEntriesRPC(stateClass, rpc.body.candidateId, False)
                 return
+        else: 
+            #if stateClass.getCurrentTerm() > rpc.body.term
+            # then the node that sent the RPC is not updated
+            # since it has an outdated term
+            reply(rpc, type="RequestVoteRPCResponse", voteGranted=False, term=stateClass.getCurrentTerm())
+            return
 
     finally: stateClass.lock.release()
 
@@ -98,27 +104,25 @@ def handleRequestVoteRPCResponse(stateClass : State, response):
             stateClass.setVotedFor(None)
             return
 
-        if response.body.voteGranted == True:
-            if stateClass.getCurrentTerm() == response.body.term:
-                logging.debug("vote received from : " + str(response.src))
-                stateClass.receiveVote(response.src)
-                stateClass.resetTimeout() # resets timeout
+        if stateClass.getState() == 'Candidate' and response.body.voteGranted == True and stateClass.getCurrentTerm() == response.body.term:
+            #logging.debug("vote received from : " + str(response.src))
+            stateClass.receiveVote(response.src)
+            stateClass.resetTimeout() # resets timeout
 
-                #if the size of the set 'receivedVotes' equals to the majority
-                # then the node can declare itself as leader
-                if stateClass.numberOfVotes() == stateClass.getMajority():
-                    stateClass.changeStateTo('Leader')
-                    sendHeartBeatsToAll(stateClass)
+            #if the size of the set 'receivedVotes' equals to the majority
+            # then the node can declare itself as leader
+            if stateClass.numberOfVotes() == stateClass.getMajority():
+                stateClass.changeStateTo('Leader')
+                sendHeartBeatsToAll(stateClass)
 
-                    #Add client requests, present in the requests buffer, to the log
-                    for m in stateClass.getRequestsBuffer():
-                        stateClass.addEntryToLog(m)
+                #Add client requests, present in the requests buffer, to the log
+                for m in stateClass.getRequestsBuffer():
+                    stateClass.addEntryToLog(m)
                         
-                    #Clear the requests buffer
-                    stateClass.clearRequestsBuffer()
-                    
-                    logging.warning(str(time.time()) + " :Became leader")
+                #Clear the requests buffer
+                stateClass.clearRequestsBuffer()
+                
+                logging.warning(str(time.time()) + " :Became leader")
 
-            # elif currentTerm > response.body.term: ignores because its an outdated reply
-    
+        #Else ignores because it is either outdated, or the response is negative, or the node is not in candidate mode
     finally: stateClass.lock.release()
