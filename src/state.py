@@ -4,7 +4,6 @@ from math import comb
 from random import Random
 import logging
 
-#TODO - check what can be initialized from the start
 class State:
     def __init__(self, node_id, node_ids):
 

@@ -122,7 +122,7 @@ class ReadsState:
     def readTimeoutsLoop(self):
         lowestTout = None
 
-        while True: #TODO - change condition
+        while True:
             lowestTout = float("inf") # sets the variable to infinite
 
             self.readsLock.acquire()

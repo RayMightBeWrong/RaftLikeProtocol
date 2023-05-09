@@ -46,7 +46,6 @@ def raftTimeoutsScheduler():
         if stateClass.getRaftTout() > stateClass.getSendAppendEntriesRPCTout():
             #updates 'raftTout' variable, decreasing it by 'sendAppendEntriesRPCTout', 
             # but it can't go bellow 0, so we use the max function 
-            #TODO -> update raft timout 
             stateClass.updateRaftTout()
             #raftTout = max(0, raftTout - sendAppendEntriesRPCTout) 
 
@@ -56,7 +55,7 @@ def raftTimeoutsScheduler():
             time.sleep(stateClass.getSendAppendEntriesRPCTout() / 1000) 
         else:
 
-            auxTout = stateClass.getRaftTout() #TODO -> get rafttout
+            auxTout = stateClass.getRaftTout()
             stateClass.setRaftTout(0)
             stateClass.lock.release() # releases lock before going to sleep
             time.sleep(auxTout / 1000)
@@ -65,8 +64,8 @@ def raftTimeoutsScheduler():
 
         #if the timeout reached 0, then its time to 
         # call the timeout handler and reset the timeout
-        if stateClass.getRaftTout() == 0: #TODO -> get raftout 
-            if stateClass.getState() == 'Leader': #TODO -> get state 
+        if stateClass.getRaftTout() == 0:
+            if stateClass.getState() == 'Leader':
                 handleSendAppendEntriesRPCTimeout() 
             else:
                 logging.warning("  ELECTION TIMEOUT")
@@ -85,12 +84,10 @@ def handleElectionTimeout():
     # changes to Candidate state, increments term and votes for itself
     stateClass.changeStateTo('Candidate')
     
-    #TODO -> use incrementTerm of state class function
     stateClass.incrementTerm()
 
     stateClass.setVotedFor(node_id)
     
-    #TODO -> add to votes
     stateClass.receiveVote(node_id)
 
     # broadcast RequestVote RPC

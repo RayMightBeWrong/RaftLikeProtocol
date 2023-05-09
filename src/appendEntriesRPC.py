@@ -44,7 +44,6 @@ def sendHeartBeatsToAll(stateClass : State):
         if n != stateClass.getNodeId():
             sendAppendEntriesRPC(stateClass, n, True)
 
-#TODO - ver se devemos manter o buffer até receber confirmação que o leader recebeu os pedidos, dos clientes, encaminhados
 def handleAppendEntriesRPC(stateClass : State, rpc):
     global currentTerm, log, commitIndex, votedFor, state, requestsBuffer, leader_id
 
