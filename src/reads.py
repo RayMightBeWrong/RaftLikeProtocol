@@ -164,10 +164,13 @@ class ReadsState:
                                     #The number of nodes must be enough to form a majority
                                     broadcastToRandomSubset(self.rv.getNodeId(), self.rv.getNodes(), self.rv.leader_id, self.randomizer, 
                                                             type="read_quorum", read_id=readID, key=m[0].body.key)
-
-                            self.rv.lock.release()
                         else:
                             reply(m[0], type="error", code=11) # replies to client with timeout error
+                            #Deletes entry and timeout
+                            del self.activeReads[readID]
+                            del self.readTimeouts[readID]
+                            
+                        self.rv.lock.release()
                             
                 #else tries to update the 'lowestTout' to set the sleep time until the next 
                 elif tout < lowestTout:

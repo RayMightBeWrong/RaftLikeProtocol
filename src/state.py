@@ -57,8 +57,8 @@ class State:
         self.raftTimeoutsThread = None
         self.runTimeoutThread = True # while true keep running the timeout thread 
         self.sendAppendEntriesRPCTout = 50 # timeout to send AppendEntries RPC to every server (in milliseconds)
-        self.lowerLimElectionTout = 300 # lower limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
-        self.upperLimElectionTout = 500 # upper limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
+        self.lowerLimElectionTout = 150 # lower limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
+        self.upperLimElectionTout = 300 # upper limit for the random generation of the timeout to become candidate in case no message from a leader arrives (in milliseconds)
         self.raftTout = self.getTimeout() #raft related timeout
 
    ########################## AUX FUNCTIONS ##########################

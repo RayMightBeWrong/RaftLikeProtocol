@@ -47,7 +47,6 @@ def raftTimeoutsScheduler():
             #updates 'raftTout' variable, decreasing it by 'sendAppendEntriesRPCTout', 
             # but it can't go bellow 0, so we use the max function 
             stateClass.updateRaftTout()
-            #raftTout = max(0, raftTout - sendAppendEntriesRPCTout) 
 
             stateClass.lock.release() # releases lock before going to sleep
 
